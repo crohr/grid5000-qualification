@@ -1,0 +1,103 @@
+#!/usr/bin/env ruby
+# author: Cyril Rohr <cyril.rohr@irisa.fr>
+# Really simple qualification script, that will try to submit a job on all sites.
+# Once the jobs are running, it will try to submit a deployment on all of them.
+# Run with ./qualify
+
+require 'restfully'
+require 'timeout'
+require 'logger'
+require 'fileutils'
+
+
+AUTHORIZED_KEY = File.read File.expand_path("~/.ssh/id_dsa.pub")
+OAR_WALLTIME_SYNTAX = "00:15:00"
+WALLTIME = 60*15 # 15 mins
+LOGS_DIR = File.join(File.dirname(__FILE__), "log")
+
+
+FileUtils.mkdir_p(LOGS_DIR) unless File.exist?(LOGS_DIR)
+logger = Logger.new(File.join(LOGS_DIR, 'qualification.log'), 100, 1024000)
+logger.level = Logger::INFO
+
+errors = []
+jobs = []
+deployments = []
+
+start_time = Time.now
+
+Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml", :verbose => true, :logger => logger) do |root, session|
+  
+  banner_for_step0 = "========= BEGIN [#{start_time}]"
+  session.logger.info banner_for_step0
+  STDOUT.puts banner_for_step0
+  
+  root.sites.each do |site|
+    session.logger.info "Submitting a job on the #{site['uid']} site..."
+    job = {
+      :resources => "nodes=3,walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
+      :command => "sleep #{WALLTIME}", # really need to address this
+      :types => ["deploy"]
+    }
+    begin
+      Timeout.timeout(5) do
+        job = site.jobs.submit(job)
+        jobs << job.reload
+      end
+    rescue Exception, Timeout::Error => e
+      session.logger.error [site['uid'], e.class, e.message, e.backtrace]
+    end
+  end
+  
+  banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{root.sites['total']} possible."
+  session.logger.info banner_for_step1
+  STDOUT.puts banner_for_step1
+  
+  while !jobs.all?{|j| j.reload['state'] == "running"}
+    sleep 3
+  end
+  
+  jobs.each do |job|
+    site = job.parent
+    session.logger.info job.inspect
+    deployment = {
+      :nodes => job['assigned_nodes'],
+      :environment => "lenny-x64-base",
+      :key => AUTHORIZED_KEY
+    }
+    begin
+      Timeout.timeout(5) do
+        session.logger.info "Submitting a deployment on the #{site['uid']} site..."
+        deployments << job.parent.deployments.submit(deployment)
+      end
+    rescue Exception, Timeout::Error => e
+      session.logger.error [site['uid'], e.class, e.message, e.backtrace]
+    end
+  end
+  
+  banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs submitted."
+  session.logger.info banner_for_step2
+  STDOUT.puts banner_for_step2
+  
+  begin
+    Timeout.timeout(3600) do
+      while deployments.any?{ |d| d.reload['status'] == "processing" }
+        sleep 30
+      end
+    end
+  rescue Timeout::Error => e
+    session.logger.error  "One of the deployment has not succeeded in the given time:"+
+                          "\n#{deployments.map{|d| "#{d.parent['uid']}, #{d['status']}"}.join(", ")}"
+  end
+  
+  deployments.each do |deployment|
+    session.logger.info deployment.inspect
+  end
+  
+  end_time = Time.now
+  banner_for_step3 = "========= END [#{end_time} - #{end_time-start_time}s]"
+  session.logger.info banner_for_step3
+  STDOUT.puts banner_for_step3
+  
+end
+
