@@ -4,11 +4,17 @@
 # Once the jobs are running, it will try to submit a deployment on all of them.
 # Run with ./qualify
 
-require 'restfully'
-require 'timeout'
-require 'logger'
-require 'fileutils'
-
+already_tried = false
+begin
+  require 'restfully'
+  require 'timeout'
+  require 'logger'
+  require 'fileutils'
+  require 'json'
+rescue LoadError => e
+  require 'rubygems'
+  retry unless already_tried
+end
 
 AUTHORIZED_KEY = File.read File.expand_path("~/.ssh/id_dsa.pub")
 OAR_WALLTIME_SYNTAX = "00:15:00"
@@ -17,7 +23,7 @@ LOGS_DIR = File.join(File.dirname(__FILE__), "log")
 
 
 FileUtils.mkdir_p(LOGS_DIR) unless File.exist?(LOGS_DIR)
-logger = Logger.new(File.join(LOGS_DIR, 'qualification.log'), 100, 1024000)
+logger = Logger.new(File.join(LOGS_DIR, 'qualification.log'), 50, 1024000)
 logger.level = Logger::INFO
 
 errors = []
@@ -30,7 +36,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   
   banner_for_step0 = "========= BEGIN [#{start_time}]"
   session.logger.info banner_for_step0
-  STDOUT.puts banner_for_step0
+  puts banner_for_step0
   
   root.sites.each do |site|
     session.logger.info "Submitting a job on the #{site['uid']} site..."
@@ -40,7 +46,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       :types => ["deploy"]
     }
     begin
-      Timeout.timeout(5) do
+      Timeout.timeout(10) do
         job = site.jobs.submit(job)
         jobs << job.reload
       end
@@ -51,7 +57,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   
   banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{root.sites['total']} possible."
   session.logger.info banner_for_step1
-  STDOUT.puts banner_for_step1
+  puts banner_for_step1
   
   while !jobs.all?{|j| j.reload['state'] == "running"}
     sleep 3
@@ -66,7 +72,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       :key => AUTHORIZED_KEY
     }
     begin
-      Timeout.timeout(5) do
+      Timeout.timeout(10) do
         session.logger.info "Submitting a deployment on the #{site['uid']} site..."
         deployments << job.parent.deployments.submit(deployment)
       end
@@ -77,7 +83,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   
   banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs submitted."
   session.logger.info banner_for_step2
-  STDOUT.puts banner_for_step2
+  puts banner_for_step2
   
   begin
     Timeout.timeout(3600) do
@@ -97,7 +103,24 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   end_time = Time.now
   banner_for_step3 = "========= END [#{end_time} - #{end_time-start_time}s]"
   session.logger.info banner_for_step3
-  STDOUT.puts banner_for_step3
+  puts banner_for_step3
   
+  if jobs.length == root.sites.length && deployments.length == root.sites.length
+    exit(0)
+  else
+    message = %{
+      Qualification started at #{start_time}, ended at #{end_time} (duration=#{(end_time-start_time).to_i}s)
+      There were #{jobs.length}/#{root.sites.length} jobs successfully submitted, and #{deployments.length}/#{jobs.length} deployments successfully completed.
+      
+      * Jobs
+      #{jobs.inspect}
+      
+      * Deployments
+      #{deployments.inspect}
+      
+      Please inspect the log to find out the causes of the errors.
+    }
+    session.post("/sid/notifications", {:to => ["mailto:cyril.rohr@irisa.fr"], :body => message}.to_json, :headers => {:content_type => "application/json", :accept => "application/json"})
+    exit(1)
+  end
 end
-
