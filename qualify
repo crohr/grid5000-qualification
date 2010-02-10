@@ -16,7 +16,7 @@ rescue LoadError => e
   retry unless already_tried
 end
 
-AUTHORIZED_KEY = File.read File.expand_path("~/.ssh/id_rsa.pub")
+AUTHORIZED_KEY = File.read File.expand_path($*[0] || "~/.ssh/id_dsa.pub")
 OAR_WALLTIME_SYNTAX = "00:15:00"
 WALLTIME = 60*15 # 15 mins
 LOGS_DIR = File.join(File.dirname(__FILE__), "log")
