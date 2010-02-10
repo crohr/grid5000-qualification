@@ -17,10 +17,11 @@ rescue LoadError => e
 end
 
 AUTHORIZED_KEY = File.read File.expand_path($*[0] || "~/.ssh/id_dsa.pub")
-OAR_WALLTIME_SYNTAX = "00:15:00"
+OAR_WALLTIME_SYNTAX = "00:30:00"
 WALLTIME = 60*15 # 15 mins
 LOGS_DIR = File.join(File.dirname(__FILE__), "log")
-
+TIMEOUT_JOBS_POLL = 600
+TIMEOUT_DEPLOYMENTS_POLL = 3600
 
 FileUtils.mkdir_p(LOGS_DIR) unless File.exist?(LOGS_DIR)
 logger = Logger.new(File.join(LOGS_DIR, 'qualification.log'), 50, 1024000)
@@ -51,7 +52,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   root.sites.each do |site|
     session.logger.info "Submitting a job on the #{site['uid']} site..."
     job = {
-      :resources => "nodes=3,walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
+      :resources => "nodes=1,walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
       :command => "sleep #{WALLTIME}", # really need to address this
       :types => ["deploy"]
     }
@@ -59,7 +60,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       Timeout.timeout(10) do
         job = site.jobs.submit(job)
         jobs << job.reload
-      end
+      end  
     rescue Exception, Timeout::Error => e
       session.logger.error [site['uid'], e.class, e.message, e.backtrace]
     end
@@ -70,17 +71,18 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   puts banner_for_step1
   
   begin
-    Timeout.timeout(600) do
+    Timeout.timeout(TIMEOUT_JOBS_POLL) do
       while !jobs.all?{|j| j.reload['state'] == "running"}
-        sleep 10
+        sleep 30
       end
     end
   rescue Timeout::Error => e
     session.logger.error  "One of the jobs has not succeeded in the given time:"+
-                          "\n#{jobs.map{|j| "#{j.parent['uid']}, #{j['state']}"}.join(", ")}"
-    jobs.each{|job| job.delete}
+                          "\n#{jobs.map{|j| "#{j.parent['uid']}: #{j['state']}"}.join(", ")}"
+    jobs.each{|job| job.delete if job['state'] == "waiting" }
   end
 
+  jobs.reject!{|j| j['state'] == 'waiting'}
   
   jobs.each do |job|
     site = job.parent
@@ -99,26 +101,24 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       session.logger.error [site['uid'], e.class, e.message, e.backtrace]
     end
   end
-  
-  banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs submitted."
+
+  banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs running."
   session.logger.info banner_for_step2
   puts banner_for_step2
-  
+
   begin
-    Timeout.timeout(3600) do
+    Timeout.timeout(TIMEOUT_DEPLOYMENTS_POLL) do
       while deployments.any?{ |d| d.reload['status'] == "processing" }
         sleep 30
       end
     end
   rescue Timeout::Error => e
     session.logger.error  "One of the deployment has not succeeded in the given time:"+
-                          "\n#{deployments.map{|d| "#{d.parent['uid']}, #{d['status']}"}.join(", ")}"
+                          "\n#{deployments.map{|d| "#{d.parent['uid']}: #{d['status']}"}.join(", ")}"
     deployments.each{|deployment| deployment.delete if deployment['status'] == "processing" }
   end
-  
-  deployments.each do |deployment|
-    session.logger.info deployment.inspect
-  end
+
+  deployments.reject!{|d| d['status'] != "terminated"}
   
   end_time = Time.now
   banner_for_step3 = "========= END [#{end_time} - #{end_time-start_time}s]"
@@ -130,7 +130,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   else
     message = %{
       Qualification started at #{start_time}, ended at #{end_time} (duration=#{(end_time-start_time).to_i}s)
-      There were #{jobs.length}/#{root.sites.length} jobs successfully submitted, and #{deployments.length}/#{jobs.length} deployments successfully completed.
+      There were #{jobs.length}/#{root.sites.length} jobs successfully submitted and running, and #{deployments.length}/#{jobs.length} deployments successfully completed.
       
       * Jobs
       #{jobs.inspect}
