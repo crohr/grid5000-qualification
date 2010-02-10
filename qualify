@@ -16,7 +16,7 @@ rescue LoadError => e
   retry unless already_tried
 end
 
-AUTHORIZED_KEY = File.read File.expand_path("~/.ssh/id_dsa.pub")
+AUTHORIZED_KEY = File.read File.expand_path("~/.ssh/id_rsa.pub")
 OAR_WALLTIME_SYNTAX = "00:15:00"
 WALLTIME = 60*15 # 15 mins
 LOGS_DIR = File.join(File.dirname(__FILE__), "log")
@@ -31,6 +31,16 @@ jobs = []
 deployments = []
 
 start_time = Time.now
+
+%w{INT TERM}.each do |signal|
+  Signal.trap( signal ) do
+    logger.warn "[#{Process.pid}] Received #{signal}, stopping #{__FILE__}"
+    logger.info "Killing all jobs and deployments..."
+    jobs.each{|j| j.delete}
+    deployments.each{|d| d.delete}
+    exit(2)
+  end
+end
 
 Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml", :verbose => true, :logger => logger) do |root, session|
   
@@ -59,9 +69,18 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   session.logger.info banner_for_step1
   puts banner_for_step1
   
-  while !jobs.all?{|j| j.reload['state'] == "running"}
-    sleep 3
+  begin
+    Timeout.timeout(600) do
+      while !jobs.all?{|j| j.reload['state'] == "running"}
+        sleep 10
+      end
+    end
+  rescue Timeout::Error => e
+    session.logger.error  "One of the jobs has not succeeded in the given time:"+
+                          "\n#{jobs.map{|j| "#{j.parent['uid']}, #{j['state']}"}.join(", ")}"
+    jobs.each{|job| job.delete}
   end
+
   
   jobs.each do |job|
     site = job.parent
@@ -94,6 +113,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   rescue Timeout::Error => e
     session.logger.error  "One of the deployment has not succeeded in the given time:"+
                           "\n#{deployments.map{|d| "#{d.parent['uid']}, #{d['status']}"}.join(", ")}"
+    deployments.each{|deployment| deployment.delete if deployment['status'] == "processing" }
   end
   
   deployments.each do |deployment|
