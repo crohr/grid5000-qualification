@@ -87,16 +87,16 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
   
     begin
       Timeout.timeout(TIMEOUT_JOBS_POLL) do
-        while !jobs.all?{|j| j.reload['state'] == "running"}
+        while jobs.any?{|j| j.reload['state'] != "running"}
           sleep 30
         end
       end
     rescue Timeout::Error => e
       message = "One of the jobs has not succeeded in the given time: "+
-                            "#{jobs.map{|j| "#{j.parent['uid']}: #{j['state']}"}.join(", ")}"
+                            "#{jobs.map{|j| "#{j.parent['uid']}: #{j.reload['state']}"}.join(", ")}"
       session.logger.error message
       output.puts message
-      jobs.each{|job| job.delete if job['state'] == "waiting" }
+      jobs.each{|job| job.delete if job['state'] != "running" }
     end
 
     jobs.reject!{|j| j['state'] == 'waiting'}
@@ -131,8 +131,8 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
         end
       end
     rescue Timeout::Error => e
-      message = "One of the deployment has not succeeded in the given time: "+
-                "#{deployments.map{|d| "#{d.parent['uid']}: #{d['status']}"}.join(", ")}"
+      message = "One of the deployments has not succeeded in the given time: "+
+                "#{deployments.map{|d| "#{d.parent['uid']}: #{d.reload['status']}"}.join(", ")}"
       session.logger.error message
       output.puts message
       deployments.each{|deployment| deployment.delete if deployment['status'] == "processing" }
@@ -161,11 +161,11 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       #{deployments.inspect}
       
       * Abridged log:
-      #{output_file.read}
+      #{File.read(File.join(LOGS_DIR, "output.log"))}
       
       Please inspect the complete log to find out the causes of the errors.
     }
-    session.post("/sid/notifications", {:to => ["mailto:cyril.rohr@irisa.fr?subject=Qualification Error"], :body => message}.to_json, :headers => {:content_type => "application/json", :accept => "application/json"})
+    session.post("/sid/notifications", {:to => ["mailto:cyril.rohr@irisa.fr?subject=QualificationError"], :body => message}.to_json, :headers => {:content_type => "application/json", :accept => "application/json"})
     exit(1)
   end
 end
