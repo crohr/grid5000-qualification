@@ -30,8 +30,8 @@ logger.level = Logger::INFO
 errors = []
 jobs = []
 deployments = []
-
 start_time = Time.now
+end_time = nil
 
 %w{INT TERM}.each do |signal|
   Signal.trap( signal ) do
@@ -43,87 +43,109 @@ start_time = Time.now
   end
 end
 
+
 Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml", :verbose => true, :logger => logger) do |root, session|
   
-  banner_for_step0 = "========= BEGIN [#{start_time}]"
-  session.logger.info banner_for_step0
-  puts banner_for_step0
+  output_file = File.open(File.join(LOGS_DIR, "output.log"), "w") do |output|
+    output.sync = true
+    
+    banner_for_step0 = "========= BEGIN [#{start_time}]"
+    session.logger.info banner_for_step0
+    output.puts banner_for_step0
   
-  root.sites.each do |site|
-    session.logger.info "Submitting a job on the #{site['uid']} site..."
-    job = {
-      :resources => "nodes=1,walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
-      :command => "sleep #{WALLTIME}", # really need to address this
-      :types => ["deploy"]
-    }
+    root.sites.each do |site|
+      status = site.status.inject({:hardware_state => Hash.new(0), :system_state => Hash.new(0)}){ |accu, status| 
+        accu[:hardware_state][status["hardware_state"]] += 1
+        accu[:system_state][status["system_state"]] += 1
+        accu
+      }
+      message = "Status of #{site['uid']}: #{status.inspect}"
+      session.logger.info message
+      output.puts message
+      session.logger.info "Submitting a job on the #{site['uid']} site..."
+      job = {
+        :resources => "nodes=#{[status[:system_state]["free"] || 0, rand(3)+1].min},walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
+        :command => "sleep #{WALLTIME}", # really need to address this
+        :types => ["deploy"]
+      }
+      session.logger.info job
+      begin
+        Timeout.timeout(10) do
+          job = site.jobs.submit(job)
+          jobs << job.reload
+        end  
+      rescue Exception, Timeout::Error => e
+        output.puts [site['uid'], e.class, e.message].inspect
+        session.logger.error [site['uid'], e.class, e.message, e.backtrace]
+      end
+    end
+  
+    banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{root.sites['total']} possible."
+    session.logger.info banner_for_step1
+    output.puts banner_for_step1
+    
+  
     begin
-      Timeout.timeout(10) do
-        job = site.jobs.submit(job)
-        jobs << job.reload
-      end  
-    rescue Exception, Timeout::Error => e
-      session.logger.error [site['uid'], e.class, e.message, e.backtrace]
+      Timeout.timeout(TIMEOUT_JOBS_POLL) do
+        while !jobs.all?{|j| j.reload['state'] == "running"}
+          sleep 30
+        end
+      end
+    rescue Timeout::Error => e
+      message = "One of the jobs has not succeeded in the given time: "+
+                            "#{jobs.map{|j| "#{j.parent['uid']}: #{j['state']}"}.join(", ")}"
+      session.logger.error message
+      output.puts message
+      jobs.each{|job| job.delete if job['state'] == "waiting" }
     end
-  end
+
+    jobs.reject!{|j| j['state'] == 'waiting'}
   
-  banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{root.sites['total']} possible."
-  session.logger.info banner_for_step1
-  puts banner_for_step1
-  
-  begin
-    Timeout.timeout(TIMEOUT_JOBS_POLL) do
-      while !jobs.all?{|j| j.reload['state'] == "running"}
-        sleep 30
+    jobs.each do |job|
+      site = job.parent
+      session.logger.info job.inspect
+      deployment = {
+        :nodes => job['assigned_nodes'],
+        :environment => "lenny-x64-base",
+        :key => AUTHORIZED_KEY
+      }
+      begin
+        Timeout.timeout(10) do
+          session.logger.info "Submitting a deployment on the #{site['uid']} site..."
+          deployments << job.parent.deployments.submit(deployment)
+        end
+      rescue Exception, Timeout::Error => e
+        output.puts [site['uid'], e.class, e.message].inspect
+        session.logger.error [site['uid'], e.class, e.message, e.backtrace]
       end
     end
-  rescue Timeout::Error => e
-    session.logger.error  "One of the jobs has not succeeded in the given time:"+
-                          "\n#{jobs.map{|j| "#{j.parent['uid']}: #{j['state']}"}.join(", ")}"
-    jobs.each{|job| job.delete if job['state'] == "waiting" }
-  end
 
-  jobs.reject!{|j| j['state'] == 'waiting'}
-  
-  jobs.each do |job|
-    site = job.parent
-    session.logger.info job.inspect
-    deployment = {
-      :nodes => job['assigned_nodes'],
-      :environment => "lenny-x64-base",
-      :key => AUTHORIZED_KEY
-    }
+    banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs running."
+    session.logger.info banner_for_step2
+    output.puts banner_for_step2
+
     begin
-      Timeout.timeout(10) do
-        session.logger.info "Submitting a deployment on the #{site['uid']} site..."
-        deployments << job.parent.deployments.submit(deployment)
+      Timeout.timeout(TIMEOUT_DEPLOYMENTS_POLL) do
+        while deployments.any?{ |d| d.reload['status'] == "processing" }
+          sleep 30
+        end
       end
-    rescue Exception, Timeout::Error => e
-      session.logger.error [site['uid'], e.class, e.message, e.backtrace]
+    rescue Timeout::Error => e
+      message = "One of the deployment has not succeeded in the given time: "+
+                "#{deployments.map{|d| "#{d.parent['uid']}: #{d['status']}"}.join(", ")}"
+      session.logger.error message
+      output.puts message
+      deployments.each{|deployment| deployment.delete if deployment['status'] == "processing" }
     end
-  end
 
-  banner_for_step2 = "Managed to successfully submit #{deployments.length} deployments out of #{jobs.length} jobs running."
-  session.logger.info banner_for_step2
-  puts banner_for_step2
-
-  begin
-    Timeout.timeout(TIMEOUT_DEPLOYMENTS_POLL) do
-      while deployments.any?{ |d| d.reload['status'] == "processing" }
-        sleep 30
-      end
-    end
-  rescue Timeout::Error => e
-    session.logger.error  "One of the deployment has not succeeded in the given time:"+
-                          "\n#{deployments.map{|d| "#{d.parent['uid']}: #{d['status']}"}.join(", ")}"
-    deployments.each{|deployment| deployment.delete if deployment['status'] == "processing" }
-  end
-
-  deployments.reject!{|d| d['status'] != "terminated"}
+    deployments.reject!{|d| d['status'] != "terminated"}
   
-  end_time = Time.now
-  banner_for_step3 = "========= END [#{end_time} - #{end_time-start_time}s]"
-  session.logger.info banner_for_step3
-  puts banner_for_step3
+    end_time = Time.now
+    banner_for_step3 = "========= END [#{end_time} - #{end_time-start_time}s]"
+    session.logger.info banner_for_step3
+    output.puts banner_for_step3
+
+  end
   
   if jobs.length == root.sites.length && deployments.length == root.sites.length
     exit(0)
@@ -131,16 +153,20 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
     message = %{
       Qualification started at #{start_time}, ended at #{end_time} (duration=#{(end_time-start_time).to_i}s)
       There were #{jobs.length}/#{root.sites.length} jobs successfully submitted and running, and #{deployments.length}/#{jobs.length} deployments successfully completed.
-      
+    
       * Jobs
       #{jobs.inspect}
-      
+    
       * Deployments
       #{deployments.inspect}
       
-      Please inspect the log to find out the causes of the errors.
+      * Abridged log:
+      #{output_file.read}
+      
+      Please inspect the complete log to find out the causes of the errors.
     }
-    session.post("/sid/notifications", {:to => ["mailto:cyril.rohr@irisa.fr"], :body => message}.to_json, :headers => {:content_type => "application/json", :accept => "application/json"})
+    session.post("/sid/notifications", {:to => ["mailto:cyril.rohr@irisa.fr?subject=Qualification Error"], :body => message}.to_json, :headers => {:content_type => "application/json", :accept => "application/json"})
     exit(1)
   end
 end
+
