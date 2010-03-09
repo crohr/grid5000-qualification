@@ -12,16 +12,19 @@ begin
   require 'fileutils'
   require 'json'
 rescue LoadError => e
-  require 'rubygems'
-  retry unless already_tried
+  unless already_tried
+    already_tried = true
+    require 'rubygems'
+    retry
+  end
 end
 
 AUTHORIZED_KEY = File.read File.expand_path($*[0] || "~/.ssh/id_dsa.pub")
-OAR_WALLTIME_SYNTAX = "00:30:00"
-WALLTIME = 60*15 # 15 mins
+OAR_WALLTIME_SYNTAX = "00:60:00"
+WALLTIME = 60*60 # 60 mins
 LOGS_DIR = File.join(File.dirname(__FILE__), "log")
-TIMEOUT_JOBS_POLL = 600
-TIMEOUT_DEPLOYMENTS_POLL = 3600
+TIMEOUT_JOBS_POLL = 60*5 # 5 mins
+TIMEOUT_DEPLOYMENTS_POLL = 60*45 # 45 mins
 
 FileUtils.mkdir_p(LOGS_DIR) unless File.exist?(LOGS_DIR)
 logger = Logger.new(File.join(LOGS_DIR, 'qualification.log'), 50, 1024000)
@@ -32,6 +35,7 @@ jobs = []
 deployments = []
 start_time = Time.now
 end_time = nil
+sites_involved = []
 
 %w{INT TERM}.each do |signal|
   Signal.trap( signal ) do
@@ -62,9 +66,11 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       message = "Status of #{site['uid']}: #{status.inspect}"
       session.logger.info message
       output.puts message
+      next unless status[:system_state].has_key?("free") && status[:system_state]["free"] > 0
+      sites_involved << site
       session.logger.info "Submitting a job on the #{site['uid']} site..."
       job = {
-        :resources => "nodes=#{[status[:system_state]["free"] || 0, rand(3)+1].min},walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
+        :resources => "nodes=#{[status[:system_state]["free"], rand(3)+1].min},walltime=#{OAR_WALLTIME_SYNTAX}", # really need to address this
         :command => "sleep #{WALLTIME}", # really need to address this
         :types => ["deploy"]
       }
@@ -80,7 +86,7 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
       end
     end
   
-    banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{root.sites['total']} possible."
+    banner_for_step1 = "Managed to successfully submit #{jobs.length} jobs out of #{sites_involved.length} possible."
     session.logger.info banner_for_step1
     output.puts banner_for_step1
     
@@ -147,12 +153,12 @@ Restfully::Session.new(:configuration_file => "~/.restfully/api.grid5000.fr.yml"
 
   end
   
-  if jobs.length == root.sites.length && deployments.length == root.sites.length
+  if jobs.length == sites_involved.length && deployments.length == jobs.length
     exit(0)
   else
     message = %{
       Qualification started at #{start_time}, ended at #{end_time} (duration=#{(end_time-start_time).to_i}s)
-      There were #{jobs.length}/#{root.sites.length} jobs successfully submitted and running, and #{deployments.length}/#{jobs.length} deployments successfully completed.
+      There were #{jobs.length}/#{sites_involved.length} jobs successfully submitted and running, and #{deployments.length}/#{jobs.length} deployments successfully completed.
     
       * Jobs
       #{jobs.inspect}
