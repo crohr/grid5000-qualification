@@ -6,7 +6,7 @@ describe "Reference API 2.0" do
       response.code.should == 200
       result = parse(response)
       result['links'].should == [
-        {"href"=>"/2.0/grid5000/sites/rennes/versions/b11b4e515b921cc83d4f2a68923e899fcadf7c6a", "title"=>"version", "rel"=>"member", "type"=>"application/vnd.fr.grid5000.api.Version+json;level=1"}, 
+        {"href"=>"/2.0/grid5000/sites/rennes/versions/#{result['version']}", "title"=>"version", "rel"=>"member", "type"=>"application/vnd.fr.grid5000.api.Version+json;level=1"}, 
         {"href"=>"/2.0/grid5000/sites/rennes/versions", "title"=>"versions", "rel"=>"collection", "type"=>"application/vnd.fr.grid5000.api.Collection+json;level=1"}, 
         {"href"=>"/2.0/grid5000/sites/rennes", "rel"=>"self", "type"=>"application/vnd.fr.grid5000.api.Site+json;level=1"}, 
         {"href"=>"/2.0/grid5000/sites/rennes/clusters", "title"=>"clusters", "rel"=>"collection", "type"=>"application/vnd.fr.grid5000.api.Collection+json;level=1"}, 
