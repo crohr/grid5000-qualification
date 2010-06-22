@@ -9,7 +9,8 @@ module TwoDot0
         stats[:system][node_status["system_state"]] ||= 0
         stats[:system][node_status["system_state"]] += 1
       end
-      if stats[:hardware]["alive"] > 0 && stats[:system]["free"] > 0
+      if (stats[:hardware]["alive"] || 0) > 0 && 
+            (stats[:system]["free"] || 0) > 0
         post uri_for("/2.0/grid5000/sites/#{site}/jobs"), payload, 
           {:accept => :json} do |response|
           if block_given?
